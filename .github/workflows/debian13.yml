@@ -1,0 +1,42 @@
+name: Debian 13 installation validation
+on:
+  push:
+    branches: [main]
+    paths: ['xy.sh', 'install.sh', 'tests/**', '.github/workflows/debian13.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build Debian 13 test environment
+        run: docker build -t xy-debian13 -f tests/Dockerfile .
+      - name: Boot real systemd in disposable Debian 13 container
+        run: |
+          docker run -d --name xy-ci --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "$PWD:/workspace:ro" xy-debian13
+          for i in $(seq 1 30); do
+            if docker exec xy-ci systemctl show-environment >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          docker logs xy-ci
+          exit 1
+      - name: Install, manage, connect, renew, rollback, and uninstall
+        run: docker exec xy-ci python3 -u /workspace/tests/integration.py
+      - name: Diagnostics
+        if: failure()
+        run: |
+          docker logs xy-ci || true
+          docker exec xy-ci journalctl -u xray --no-pager -n 120 || true
+          docker exec xy-ci cat /var/log/xray_cron_error.log || true
+          docker exec xy-ci cat /tmp/ci-client.log || true
+      - name: Cleanup disposable environment
+        if: always()
+        run: docker rm -f xy-ci || true
