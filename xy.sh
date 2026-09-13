@@ -97,6 +97,8 @@ domain_valid() {
 
 test_config() { xray run -test -config "$1"; }
 healthy_restart() {
+    # 失败的候选配置可能触发 systemd 启动限流；恢复旧配置后须清除计数。
+    systemctl reset-failed xray || return 1
     systemctl restart xray || return 1
     sleep 2
     systemctl is-active --quiet xray
