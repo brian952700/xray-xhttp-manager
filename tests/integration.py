@@ -70,6 +70,7 @@ def certificate():
     run('openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
         '-nodes', '-days', '7', '-subj', '/CN=ci.example.test',
         '-addext', 'subjectAltName=DNS:ci.example.test',
+        '-addext', 'basicConstraints=critical,CA:FALSE',
         '-keyout', str(FIXTURE / 'key.pem'), '-out', str(FIXTURE / 'fullchain.cer'))
 
 
@@ -78,6 +79,8 @@ def manager(code, check_result=True):
 
 
 def proxy_test(uuid):
+    cert_der = subprocess.check_output(['openssl', 'x509', '-in', str(CERT), '-outform', 'DER'])
+    cert_pin = hashlib.sha256(cert_der).hexdigest()
     client_config = {
         'log': {'loglevel': 'warning'},
         'inbounds': [{'listen': '127.0.0.1', 'port': 10808, 'protocol': 'socks',
@@ -88,7 +91,7 @@ def proxy_test(uuid):
             'streamSettings': {'network': 'xhttp', 'security': 'tls',
                 'xhttpSettings': {'path': '/ci'},
                 # Self-signed certificate is only used in this local CI test.
-                'tlsSettings': {'serverName': 'ci.example.test', 'allowInsecure': True}}}]
+                'tlsSettings': {'serverName': 'ci.example.test', 'pinnedPeerCertSha256': cert_pin}}}]
     }
     client_file = Path('/tmp/ci-client.json')
     client_file.write_text(json.dumps(client_config))
