@@ -4,9 +4,31 @@
 
 主要适配目标是 Debian 13（trixie）、systemd、普通 Linux VPS。也保留 apt、dnf/yum 分支，但其他发行版未实机验证。不能在 Windows、未运行 systemd 的容器或 OpenWrt 上直接安装。
 
-## 使用
+## 一键安装
 
-将 `xy.sh` 上传到服务器，进入文件所在目录后执行：
+在 Debian 13 的 SSH 终端中复制执行：
+
+```bash
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/brian952700/xray-xhttp-manager/main/install.sh | bash'
+```
+
+支持 root 用户直接运行；普通用户需要 sudo 权限，安装时会提示输入密码。安装入口会下载并检查 `xy.sh`，安装到 `/usr/local/bin/xy`，然后自动打开交互菜单。
+
+若最小化安装的 Debian 尚未安装 curl，请先以 root 执行 `apt-get update && apt-get install -y ca-certificates curl`。
+
+安装后打开管理菜单：
+
+```bash
+sudo xy
+```
+
+root 用户直接输入 `xy` 即可。再次执行一键安装命令会更新管理脚本并打开菜单，不会清空用户；如需安装/更新 Xray 环境，在菜单选择 1。
+
+[查看安装入口 install.sh](https://github.com/brian952700/xray-xhttp-manager/blob/main/install.sh) · [查看主脚本 xy.sh](https://github.com/brian952700/xray-xhttp-manager/blob/main/xy.sh)
+
+### 手动安装（可选）
+
+也可以将 `xy.sh` 上传到服务器，在文件所在目录执行：
 
 ```bash
 bash -n xy.sh
@@ -14,7 +36,7 @@ sudo install -o root -g root -m 0755 xy.sh /usr/local/bin/xy
 sudo /usr/local/bin/xy
 ```
 
-如果已经是 root，可省略 `sudo`。以后使用 `sudo xy` 打开菜单。文件是 UTF-8、LF 换行；不要用 `sh xy.sh`，也不要把内容通过管道交给 shell。
+如果已经是 root，可省略 `sudo`。文件是 UTF-8、LF 换行；不要用 `sh xy.sh`。主脚本 `xy.sh` 需要交互输入，不能直接通过管道执行；上面的一键安装入口 `install.sh` 已单独将菜单连接到终端。
 
 首次安装填写域名、监听端口和 xHTTP 路径，默认端口 443，默认路径 `/`。初始用户仍为 `admin`，UUID 从 Linux 内核随机 UUID 接口获取。安装后将输出的 `vless://` 链接导入支持 VLESS、xHTTP、TLS 的客户端。
 
