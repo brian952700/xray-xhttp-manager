@@ -83,7 +83,7 @@ def proxy_test(uuid):
     cert_der = subprocess.check_output(['openssl', 'x509', '-in', str(CERT), '-outform', 'DER'])
     cert_pin = hashlib.sha256(cert_der).hexdigest()
     client_config = {
-        'log': {'loglevel': 'warning'},
+        'log': {'loglevel': 'debug'},
         'inbounds': [{'listen': '127.0.0.1', 'port': 10808, 'protocol': 'socks',
                       'settings': {'auth': 'noauth', 'udp': False}}],
         'outbounds': [{'protocol': 'vless', 'settings': {'vnext': [{
@@ -99,8 +99,8 @@ def proxy_test(uuid):
     with open('/tmp/ci-client.log', 'w') as log:
         client = subprocess.Popen(['xray', 'run', '-config', str(client_file)], stdout=log, stderr=log)
         try:
-            for _ in range(15):
-                response = run('curl', '-fsS', '--max-time', '3', '--noproxy', '',
+            for _ in range(3):
+                response = run('curl', '-fsS', '--max-time', '10', '--noproxy', '',
                     '--socks5-hostname', '127.0.0.1:10808', 'http://127.0.0.1:19080/',
                     check=False, capture_output=True)
                 if response.returncode == 0:
@@ -187,6 +187,8 @@ def main():
     resume(child)
     child.sendline('6')
     close(child)
+
+    manager("jq '.log.loglevel=\"debug\"' /usr/local/etc/xray/config.json > /tmp/debug.json; lock; apply_config /tmp/debug.json")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
