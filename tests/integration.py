@@ -133,7 +133,13 @@ def main():
     # Verify anonymous public URLs and ensure this run tests this checkout.
     for name in ('install.sh', 'xy.sh'):
         downloaded = Path('/tmp') / ('public-' + name)
-        run('curl', '-fsSL', '--retry', '3', RAW + name, '-o', str(downloaded))
+        for attempt in range(21):
+            run('curl', '-fsSL', '--retry', '3', RAW + name, '-o', str(downloaded))
+            if downloaded.read_bytes() == (ROOT / name).read_bytes():
+                break
+            if attempt < 20:
+                print('Waiting for GitHub Raw cache: ' + name, flush=True)
+                time.sleep(15)
         check('public URL exact checkout: ' + name, downloaded.read_bytes() == (ROOT / name).read_bytes())
 
     # Execute exactly the README one-command pipeline inside a controlling PTY.
