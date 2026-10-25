@@ -282,6 +282,8 @@ def main():
     fail_script.chmod(0o755)
     dropin.write_text('[Service]\nExecStartPre=/tmp/xy-fail-once.sh\n')
     Path('/tmp/xy-fail-once').touch()
+    service_user = run('systemctl', 'show', 'xray', '-p', 'User', '--value', capture_output=True).stdout.strip() or 'root'
+    shutil.chown('/tmp/xy-fail-once', user=service_user)
     run('systemctl', 'daemon-reload')
     child.sendline('8')
     child.expect_exact('请输入新域名 [ci.example.test]：')
