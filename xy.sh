@@ -95,6 +95,27 @@ domain_valid() {
     done
 }
 
+# 客户端参数与服务端配置一起提交/回滚；_xy 是管理器元数据，Xray 忽略此字段。
+enable_encryption_config() {
+    local target=$1 generated pair decrypt encrypt temp
+    generated=$(xray vlessenc) || return 1
+    pair=$(printf '%s\n' "$generated" | jq -Rn '
+        [inputs | select(test("^\"(decryption|encryption)\":")) |
+         ("{" + . + "}") | fromjson] | .[0:2] | add
+    ') || return 1
+    decrypt=$(jq -er '.decryption | select(startswith("mlkem768x25519plus."))' <<< "$pair") || return 1
+    encrypt=$(jq -er '.encryption | select(startswith("mlkem768x25519plus."))' <<< "$pair") || return 1
+    temp=$(mktemp "$target.enc.XXXXXX") || return 1
+    if jq --arg decrypt "$decrypt" --arg encrypt "$encrypt" '
+        .inbounds[0].settings.decryption=$decrypt |
+        ._xy.vlessEncryption=$encrypt
+    ' "$target" > "$temp" && mv -f -- "$temp" "$target"; then
+        return 0
+    fi
+    rm -f -- "$temp"
+    return 1
+}
+
 test_config() { xray run -test -config "$1"; }
 healthy_restart() {
     # 失败的候选配置可能触发 systemd 启动限流；恢复旧配置后须清除计数。
@@ -250,6 +271,7 @@ install_xray() (
           tlsSettings:{certificates:[{certificateFile:$cert,keyFile:$key}]}}}],
           outbounds:[{protocol:"freedom"}]}
         ' > "$work/candidate.json"
+        enable_encryption_config "$work/candidate.json"
         printf '%s\n' "$DOMAIN" > "$DOMAIN_FILE"
     fi
     select_acme
@@ -341,12 +363,18 @@ del_user() (
 )
 
 print_link() {
-    local domain port path
+    local domain port path encryption decryption
     domain=$(cat "$DOMAIN_FILE") || return
     port=$(jq -r '.inbounds[0].port' "$CONFIG") || return
     path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$CONFIG") || return
-    printf '用户：%s\nUUID：%s\n链接：vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=xhttp&path=%s#%s\n\n' \
-        "$1" "$2" "$2" "$domain" "$port" "$(uri "$domain")" "$(uri "$path")" "$(uri "$1")"
+    decryption=$(jq -r '.inbounds[0].settings.decryption' "$CONFIG") || return
+    encryption=none
+    if [[ $decryption != none ]]; then
+        encryption=$(jq -er '._xy.vlessEncryption | select(type == "string" and startswith("mlkem768x25519plus."))' "$CONFIG") ||
+            { say '缺少客户端加密参数，无法生成有效链接；请恢复完整配置备份。' >&2; return 1; }
+    fi
+    printf '用户：%s\nUUID：%s\n链接：vless://%s@%s:%s?encryption=%s&security=tls&sni=%s&type=xhttp&path=%s#%s\n\n' \
+        "$1" "$2" "$2" "$domain" "$port" "$(uri "$encryption")" "$(uri "$domain")" "$(uri "$path")" "$(uri "$1")"
 }
 
 list_users() (
