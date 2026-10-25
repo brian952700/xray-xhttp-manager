@@ -83,7 +83,7 @@ def proxy_test(uuid):
     cert_der = subprocess.check_output(['openssl', 'x509', '-in', str(CERT), '-outform', 'DER'])
     cert_pin = hashlib.sha256(cert_der).hexdigest()
     client_config = {
-        'log': {'loglevel': 'debug'},
+        'log': {'loglevel': 'warning'},
         'inbounds': [{'listen': '127.0.0.1', 'port': 10808, 'protocol': 'socks',
                       'settings': {'auth': 'noauth', 'udp': False}}],
         'outbounds': [{'protocol': 'vless', 'settings': {'vnext': [{
@@ -188,7 +188,9 @@ def main():
     child.sendline('6')
     close(child)
 
-    manager("jq '.log.loglevel=\"debug\"' /usr/local/etc/xray/config.json > /tmp/debug.json; lock; apply_config /tmp/debug.json")
+    # Disposable CI fixture only: current Xray blocks private destinations by default.
+    # Permit exactly the local HTTP test target; production config keeps core defaults.
+    manager("jq '.outbounds[0].settings.finalRules=[{\"action\":\"allow\",\"network\":\"tcp\",\"ip\":[\"127.0.0.1\"],\"port\":19080}]' /usr/local/etc/xray/config.json > /tmp/fixture.json; lock; apply_config /tmp/fixture.json")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
