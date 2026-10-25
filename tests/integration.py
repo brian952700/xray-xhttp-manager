@@ -23,7 +23,7 @@ CERT = Path('/etc/xray-cert/server.crt')
 KEY = Path('/etc/xray-cert/server.key')
 FIXTURE = Path('/etc/xray-cert/acme/ci.example.test_ecc')
 RAW = 'https://raw.githubusercontent.com/brian952700/xray-xhttp-manager/main/'
-MENU = '请选择 [1-6]：'
+MENU = '请选择 [1-8]：'
 PAUSE = '按 Enter 返回菜单…'
 
 
@@ -67,12 +67,14 @@ def resume(child):
     child.expect_exact(MENU)
 
 
-def certificate():
+def certificate(domain='ci.example.test'):
+    fixture = Path('/etc/xray-cert/acme') / (domain + '_ecc')
+    fixture.mkdir(parents=True, exist_ok=True)
     run('openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
-        '-nodes', '-days', '7', '-subj', '/CN=ci.example.test',
-        '-addext', 'subjectAltName=DNS:ci.example.test',
+        '-nodes', '-days', '7', '-subj', '/CN=' + domain,
+        '-addext', 'subjectAltName=DNS:' + domain,
         '-addext', 'basicConstraints=critical,CA:FALSE',
-        '-keyout', str(FIXTURE / 'key.pem'), '-out', str(FIXTURE / 'fullchain.cer'))
+        '-keyout', str(fixture / 'key.pem'), '-out', str(fixture / 'fullchain.cer'))
 
 
 def manager(code, check_result=True):
@@ -92,7 +94,7 @@ def proxy_test(uuid):
             'streamSettings': {'network': 'xhttp', 'security': 'tls',
                 'xhttpSettings': {'path': '/ci'},
                 # Self-signed certificate is only used in this local CI test.
-                'tlsSettings': {'serverName': 'ci.example.test', 'pinnedPeerCertSha256': cert_pin}}}]
+                'tlsSettings': {'serverName': Path('/etc/xray-cert/domain.txt').read_text().strip(), 'pinnedPeerCertSha256': cert_pin}}}]
     }
     client_file = Path('/tmp/ci-client.json')
     client_file.write_text(json.dumps(client_config))
@@ -225,6 +227,100 @@ def main():
     shutil.copy(FIXTURE / 'key.pem', '/etc/xray-cert/staging/server.key')
     result = run('/usr/local/bin/xy', '--renew-reload', check=False)
     check('mismatched certificate rejected without replacing active pair', result.returncode != 0 and digest(CERT) == good_cert and digest(KEY) == good_key and active())
+    proxy_test(admin)
+
+    # New menu commands run against the real service and staged certificate adapter.
+    domain_file = Path('/etc/xray-cert/domain.txt')
+    before_config = CONFIG.read_bytes()
+    before_domain = domain_file.read_bytes()
+    before_cert, before_key = digest(CERT), digest(KEY)
+    old_pid = run('systemctl', 'show', 'xray', '-p', 'MainPID', '--value', capture_output=True).stdout
+    child = spawn('/usr/local/bin/xy')
+    child.expect_exact(MENU)
+    child.sendline('7')
+    child.expect_exact('Xray 服务已重启并确认运行。')
+    resume(child)
+    new_pid = run('systemctl', 'show', 'xray', '-p', 'MainPID', '--value', capture_output=True).stdout
+    check('menu restart replaces running process without changing config',
+          old_pid != new_pid and active() and CONFIG.read_bytes() == before_config)
+
+    child.sendline('8')
+    child.expect_exact('请输入新域名 [ci.example.test]：')
+    child.sendline('https://invalid.example')
+    child.expect_exact('域名格式错误')
+    resume(child)
+    check('invalid domain preserves node and certificates',
+          CONFIG.read_bytes() == before_config and domain_file.read_bytes() == before_domain
+          and digest(CERT) == before_cert and digest(KEY) == before_key and active())
+
+    # Request a domain whose fixture deliberately holds a different domain's certificate.
+    bad_fixture = Path('/etc/xray-cert/acme/wrong.example.test_ecc')
+    bad_fixture.mkdir()
+    shutil.copy(CERT, bad_fixture / 'fullchain.cer')
+    shutil.copy(KEY, bad_fixture / 'key.pem')
+    child.sendline('8')
+    child.expect_exact('请输入新域名 [ci.example.test]：')
+    child.sendline('wrong.example.test')
+    child.expect_exact('操作未完成')
+    resume(child)
+    check('wrong-domain certificate leaves active domain and TLS untouched',
+          CONFIG.read_bytes() == before_config and domain_file.read_bytes() == before_domain
+          and digest(CERT) == before_cert and digest(KEY) == before_key and active())
+
+    certificate('new.example.test')
+    # Fail exactly the first start: rollback must restore domain, TLS and running service.
+    dropin = Path('/etc/systemd/system/xray.service.d/xy-ci-fail.conf')
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    fail_script = Path('/tmp/xy-fail-once.sh')
+    fail_script.write_text('#!/bin/sh\nif [ -f /tmp/xy-fail-once ]; then rm /tmp/xy-fail-once; exit 1; fi\n')
+    fail_script.chmod(0o755)
+    dropin.write_text('[Service]\nExecStartPre=/tmp/xy-fail-once.sh\n')
+    Path('/tmp/xy-fail-once').touch()
+    run('systemctl', 'daemon-reload')
+    child.sendline('8')
+    child.expect_exact('请输入新域名 [ci.example.test]：')
+    child.sendline('new.example.test')
+    child.expect_exact('操作失败，已恢复操作前的配置/证书及服务状态。')
+    resume(child)
+    check('domain change restart failure rolls back domain, config, TLS and service',
+          CONFIG.read_bytes() == before_config and domain_file.read_bytes() == before_domain
+          and digest(CERT) == before_cert and digest(KEY) == before_key and active())
+    dropin.unlink()
+    run('systemctl', 'daemon-reload')
+
+    child.sendline('8')
+    child.expect_exact('请输入新域名 [ci.example.test]：')
+    child.sendline('new.example.test')
+    child.expect_exact('域名和证书更新完成')
+    resume(child)
+    check('domain update preserves every node setting and encryption key', CONFIG.read_bytes() == before_config)
+    check('domain update deploys new identity', domain_file.read_text().strip() == 'new.example.test'
+          and digest(CERT) != before_cert and active())
+    run('openssl', 'x509', '-in', str(CERT), '-noout', '-checkhost', 'new.example.test')
+    check('old renewal disabled after successful domain update',
+          '--remove ci.example.test' in Path('/tmp/xy-acme-fixture.log').read_text())
+    check('renewal callback bound to new domain',
+          Path('/tmp/xy-reload-new.example.test').read_text().strip().endswith('--renew-reload new.example.test'))
+    new_cert, new_key = digest(CERT), digest(KEY)
+    run('/usr/local/bin/xy', '--renew-reload', 'ci.example.test')
+    check('stale domain callback cannot replace active identity',
+          digest(CERT) == new_cert and digest(KEY) == new_key and active())
+    links = subprocess.check_output(['bash', '-c', 'source /usr/local/bin/xy; list_users'], text=True)
+    link = next(line.removeprefix('链接：') for line in links.splitlines() if line.startswith('链接：'))
+    check('new links use updated address and SNI', urlsplit(link).hostname == 'new.example.test'
+          and parse_qs(urlsplit(link).query)['sni'] == ['new.example.test'])
+
+    certificate('new.example.test')
+    child.sendline('8')
+    child.expect_exact('请输入新域名 [new.example.test]：')
+    child.sendline('')
+    child.expect_exact('域名和证书更新完成')
+    resume(child)
+    check('blank domain renews current identity without changing users or keys',
+          CONFIG.read_bytes() == before_config and domain_file.read_text().strip() == 'new.example.test'
+          and digest(CERT) != new_cert and active())
+    child.sendline('6')
+    close(child)
     proxy_test(admin)
 
     # Bootstrap under sudo must still read the menu from /dev/tty.
