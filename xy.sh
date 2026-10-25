@@ -359,9 +359,15 @@ update_domain_certificate() (
     lock
     managed_config
     directories
-    local old_domain work
+    local old_domain work old_acme old_acme_base
+    local -a old_ecc
     old_domain=$(cat "$DOMAIN_FILE")
     domain_valid "$old_domain" || die '保存的域名格式无效。'
+    DOMAIN=$old_domain
+    select_acme
+    old_acme=$ACME
+    old_acme_base=$ACME_BASE
+    old_ecc=("${ECC[@]}")
     say "当前域名：$old_domain"
     say '新域名须先解析到本机，公网 TCP 80 须可用于证书验证。留空保留域名，并检查证书续期；未到期时不会强制重签。'
     ask DOMAIN "请输入新域名 [$old_domain]："
@@ -376,9 +382,7 @@ update_domain_certificate() (
     if [[ $old_domain != "$DOMAIN" ]]; then
         # 仅停用旧域名的续期，保留证书存档，不删除共享 ACME 环境。
         if ! (
-            DOMAIN=$old_domain
-            select_acme
-            [[ ! -f $ACME ]] || "$ACME" --home "$ACME_BASE" --remove -d "$DOMAIN" "${ECC[@]}"
+            [[ ! -f $old_acme ]] || "$old_acme" --home "$old_acme_base" --remove -d "$old_domain" "${old_ecc[@]}"
         ); then
             say '新域名已生效，但旧域名续期停用失败，请检查 ACME 日志。'
         fi
