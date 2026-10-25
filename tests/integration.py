@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlsplit, parse_qs
 
 import pexpect
 
@@ -87,7 +88,7 @@ def proxy_test(uuid):
                       'settings': {'auth': 'noauth', 'udp': False}}],
         'outbounds': [{'protocol': 'vless', 'settings': {'vnext': [{
             'address': '127.0.0.1', 'port': 8443,
-            'users': [{'id': uuid, 'encryption': 'none'}]}]},
+            'users': [{'id': uuid, 'encryption': content()['_xy']['vlessEncryption']}]}]},
             'streamSettings': {'network': 'xhttp', 'security': 'tls',
                 'xhttpSettings': {'path': '/ci'},
                 # Self-signed certificate is only used in this local CI test.
@@ -104,6 +105,7 @@ def proxy_test(uuid):
                     check=False, capture_output=True)
                 if response.returncode == 0:
                     check('VLESS+xHTTP+TLS transfers HTTP via SOCKS', response.stdout == 'xy-ci-ok\n')
+                    check('client has no deprecated VLESS warning', 'VLESS (with no Flow' not in Path('/tmp/ci-client.log').read_text())
                     return
                 time.sleep(1)
             raise AssertionError('Local proxy failed: ' + response.stderr + Path('/tmp/ci-client.log').read_text())
@@ -147,6 +149,12 @@ def main():
     run('systemctl', 'is-enabled', 'xray')
     run('systemctl', 'is-active', 'cron')
     check('independent renewal cron installed', Path('/etc/cron.d/xy-acme').is_file())
+    check('fresh install enables VLESS Encryption', content()['inbounds'][0]['settings']['decryption'].startswith('mlkem768x25519plus.'))
+    check('Flow remains empty', not content()['inbounds'][0]['settings'].get('flow'))
+    links = subprocess.check_output(['bash', '-c', 'source /usr/local/bin/xy; list_users'], text=True)
+    link = next(line.removeprefix('链接：') for line in links.splitlines() if line.startswith('链接：'))
+    check('share link carries matching encryption', parse_qs(urlsplit(link).query)['encryption'][0] == content()['_xy']['vlessEncryption'])
+    check('share link never exposes server private parameter', content()['inbounds'][0]['settings']['decryption'] not in links)
     admin = content()['inbounds'][0]['settings']['clients'][0]['id']
 
     username = 'ci "quoted" \\ user #&中文'
