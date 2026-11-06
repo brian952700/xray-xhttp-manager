@@ -49,8 +49,9 @@ init_log() {
     chmod 0600 "$LOG_FILE" || return 1
 }
 run_logged() {
-    local label=$1 rc
+    local label=$1 rc allow_skip=0
     shift
+    if [[ ${1:-} == --allow-skip ]]; then allow_skip=1; shift; fi
     init_log || { warn "无法写入日志：$LOG_FILE"; return 1; }
     printf '\n[%s] %s\n' "$(date '+%F %T')" "$label" >> "$LOG_FILE"
     printf '  %s…\n' "$label"
@@ -58,6 +59,7 @@ run_logged() {
         success "$label"
     else
         rc=$?
+        if (( allow_skip && rc == 2 )); then success '证书未到期，无需重签。'; return 0; fi
         warn "$label 失败（退出码 $rc）"
         printf '\n%s  最近的诊断信息：%s\n' "$C_ERR" "$C_RESET" >&2
         tail -n 16 "$LOG_FILE" >&2
@@ -367,7 +369,7 @@ prepare_certificate() {
     fi
     if [[ ${2:-no} == yes ]]; then
         rc=0
-        run_logged '检查证书续期' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}" || rc=$?
+        run_logged '检查证书续期' --allow-skip env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}" || rc=$?
         [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书更新失败（退出码 $rc）。"
     fi
     # 永久保存正式回调；仅本次子进程继承跳过标志，由下方事务完成部署。
@@ -376,7 +378,7 @@ prepare_certificate() {
         --key-file "$STAGE/server.key" --fullchain-file "$STAGE/server.crt" --reloadcmd "$SCRIPT --renew-reload $DOMAIN"
     if ! openssl x509 -in "$STAGE/server.crt" -noout -checkend 86400 >/dev/null; then
         [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，证书无法续期。'
-        run_logged '检查证书续期' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}"
+        run_logged '检查证书续期' --allow-skip env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}"
     fi
 }
 
