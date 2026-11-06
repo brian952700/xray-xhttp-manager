@@ -124,6 +124,31 @@ def main():
     run('shellcheck', '--severity=error', str(ROOT / 'xy.sh'), str(ROOT / 'install.sh'))
     check('Bash syntax and ShellCheck error-level checks', True)
 
+    # Terminal UI: colors only on a capable TTY, and NO_COLOR disables them.
+    for disable_color in (False, True):
+        env = {**os.environ, 'TERM': 'xterm-256color'}
+        env.pop('NO_COLOR', None)
+        if disable_color:
+            env['NO_COLOR'] = ''
+        probe = pexpect.spawn('bash', ['-c', 'source /workspace/xy.sh; show_menu'],
+                              encoding='utf-8', timeout=10, env=env)
+        probe.expect(pexpect.EOF)
+        rendered = probe.before
+        probe.close()
+        check('TTY color policy NO_COLOR=' + str(disable_color),
+              ('\x1b[' in rendered) != disable_color and 'Xray · XHTTP 节点管理' in rendered)
+    plain = run('bash', '-c', 'source /workspace/xy.sh; show_menu',
+                capture_output=True, env={**os.environ, 'TERM': 'xterm-256color'})
+    check('redirected output never contains ANSI escapes', '\x1b[' not in plain.stdout + plain.stderr)
+    failed = run('bash', '-c', """source /workspace/xy.sh
+LOG_FILE=/tmp/xy-ui-test.log
+run_logged 'fixture action' sh -c 'echo ui-error-detail >&2; exit 7'
+""", check=False, capture_output=True)
+    check('logged command preserves error status and explains log path',
+          failed.returncode == 7 and 'ui-error-detail' in failed.stderr
+          and '/tmp/xy-ui-test.log' in failed.stderr
+          and (Path('/tmp/xy-ui-test.log').stat().st_mode & 0o777) == 0o600)
+
     FIXTURE.mkdir(parents=True)
     (FIXTURE / 'ci.example.test.conf').touch()
     certificate()
@@ -145,9 +170,21 @@ def main():
     # Execute exactly the README one-command pipeline inside a controlling PTY.
     child = spawn('bash', ['-o', 'pipefail', '-c', f'curl -fsSL {RAW}install.sh | bash'])
     child.expect_exact('请输入域名（已解析到本服务器）：')
+    child.sendline('https://invalid.example')
+    child.expect_exact('域名格式错误')
+    child.expect_exact('请输入域名（已解析到本服务器）：')
     child.sendline('ci.example.test')
     child.expect_exact('监听端口 [443]：')
+    child.sendline('80')
+    child.expect_exact('端口须为 1–65535')
+    child.expect_exact('监听端口 [443]：')
+    child.sendline('not-a-port')
+    child.expect_exact('端口须为 1–65535')
+    child.expect_exact('监听端口 [443]：')
     child.sendline('8443')
+    child.expect_exact('xHTTP 路径 [/]：')
+    child.sendline('invalid-path')
+    child.expect_exact('路径须以 / 开头')
     child.expect_exact('xHTTP 路径 [/]：')
     child.sendline('/ci')
     child.expect_exact('安装/更新完成；证书续期回调已注册。')
@@ -160,13 +197,24 @@ def main():
     check('fresh install enables VLESS Encryption', content()['inbounds'][0]['settings']['decryption'].startswith('mlkem768x25519plus.'))
     check('Flow remains empty', not content()['inbounds'][0]['settings'].get('flow'))
     links = subprocess.check_output(['bash', '-c', 'source /usr/local/bin/xy; list_users'], text=True)
-    link = next(line.removeprefix('链接：') for line in links.splitlines() if line.startswith('链接：'))
+    link = next(line for line in links.splitlines() if line.startswith('vless://'))
     check('share link carries matching encryption', parse_qs(urlsplit(link).query)['encryption'][0] == content()['_xy']['vlessEncryption'])
     check('share link never exposes server private parameter', content()['inbounds'][0]['settings']['decryption'] not in links)
+    menu = subprocess.check_output(['bash', '-c', 'source /usr/local/bin/xy; show_menu'], text=True)
+    check('menu displays live node summary', 'ci.example.test' in menu and '监听端口：8443' in menu and '用户数量：1' in menu)
+    child.sendline('9')
+    child.expect_exact('请输入 1–8 中的菜单编号。')
+    child.expect_exact(MENU)
     admin = content()['inbounds'][0]['settings']['clients'][0]['id']
 
     username = 'ci "quoted" \\ user #&中文'
     child.sendline('2')
+    child.expect_exact('请输入新用户名/邮箱：')
+    child.sendline('')
+    child.expect_exact('用户名须为')
+    child.expect_exact('请输入新用户名/邮箱：')
+    child.sendline('admin')
+    child.expect_exact('此用户名已存在')
     child.expect_exact('请输入新用户名/邮箱：')
     child.sendline(username)
     child.expect_exact('已添加用户：' + username)
@@ -254,6 +302,8 @@ def main():
     child.expect_exact('请输入新域名 [ci.example.test]：')
     child.sendline('https://invalid.example')
     child.expect_exact('域名格式错误')
+    child.expect_exact('请输入新域名 [ci.example.test]：')
+    child.sendline('q')
     resume(child)
     check('invalid domain preserves node and certificates',
           CONFIG.read_bytes() == before_config and domain_file.read_bytes() == before_domain
@@ -349,8 +399,14 @@ def main():
     child = spawn('/usr/local/bin/xy')
     child.expect_exact(MENU)
     child.sendline('5')
-    child.expect_exact('确定彻底卸载？[y/N]：')
+    child.expect_exact('确认卸载请输入 卸载（直接回车取消）：')
     child.sendline('y')
+    child.expect_exact('已取消卸载。')
+    resume(child)
+    check('uninstall rejects generic yes confirmation', CONFIG.exists() and active())
+    child.sendline('5')
+    child.expect_exact('确认卸载请输入 卸载（直接回车取消）：')
+    child.sendline('卸载')
     child.expect_exact('卸载完成。')
     close(child)
     check('uninstall removes manager/config/cert/cron', all(not p.exists() for p in (CONFIG, CERT, KEY, Path('/usr/local/bin/xy'), Path('/etc/cron.d/xy-acme'))))
