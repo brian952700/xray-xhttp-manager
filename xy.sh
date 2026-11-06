@@ -19,12 +19,114 @@ LOCK=/run/xy/manager.lock
 INSTALL_URL=https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh
 
 say() { printf '%s\n' "$*"; }
-die() { printf '错误：%s\n' "$*" >&2; exit 1; }
-ask() { read -r -p "$2" "$1" || die '输入已结束。'; }
-pause() { read -r -p '按 Enter 返回菜单…' _ || exit 0; }
+
+init_ui() {
+    C_RESET= C_TITLE= C_OK= C_WARN= C_ERR= C_DIM=
+    if [[ -t 1 && -t 2 && ${TERM:-dumb} != dumb && -z ${NO_COLOR+x} ]]; then
+        C_RESET=$'\033[0m'; C_TITLE=$'\033[1;36m'; C_OK=$'\033[32m'
+        C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'
+    fi
+}
+init_ui
+
+heading() { printf '\n%s  %s%s\n%s  ────────────────────────────────────────────%s\n' "$C_TITLE" "$*" "$C_RESET" "$C_DIM" "$C_RESET"; }
+success() { printf '  %s[✓]%s %s\n' "$C_OK" "$C_RESET" "$*"; }
+warn() { printf '  %s[!]%s %s\n' "$C_WARN" "$C_RESET" "$*" >&2; }
+die() { printf '\n  %s[失败]%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; exit 1; }
+step() { printf '\n  %s[%s/5]%s %s\n' "$C_TITLE" "$1" "$C_RESET" "$2"; }
+ask() {
+    printf '\n  %s%s%s\n' "$C_TITLE" "$2" "$C_RESET" >&2
+    read -r -p '  › ' "$1" || die '输入已结束。'
+}
+pause() {
+    printf '\n  %s按 Enter 返回菜单…%s' "$C_DIM" "$C_RESET" >&2
+    read -r _ || exit 0
+}
+
+LOG_FILE=/var/log/xy-manager.log
+init_log() {
+    touch "$LOG_FILE" || return 1
+    chmod 0600 "$LOG_FILE" || return 1
+}
+run_logged() {
+    local label=$1 rc
+    shift
+    init_log || { warn "无法写入日志：$LOG_FILE"; return 1; }
+    printf '\n[%s] %s\n' "$(date '+%F %T')" "$label" >> "$LOG_FILE"
+    printf '  %s…\n' "$label"
+    if "$@" >> "$LOG_FILE" 2>&1; then
+        success "$label"
+    else
+        rc=$?
+        warn "$label 失败（退出码 $rc）"
+        printf '\n%s  最近的诊断信息：%s\n' "$C_ERR" "$C_RESET" >&2
+        tail -n 16 "$LOG_FILE" >&2
+        printf '\n  完整日志：%s\n' "$LOG_FILE" >&2
+        return "$rc"
+    fi
+}
+
+prompt_domain() {
+    local dest=$1 label=$2 fallback=${3:-} entered
+    while true; do
+        ask entered "$label"
+        [[ $entered != q ]] || return 1
+        entered=${entered:-$fallback}
+        entered=${entered,,}
+        if domain_valid "$entered"; then printf -v "$dest" '%s' "$entered"; return 0; fi
+        warn '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。输入 q 返回。'
+    done
+}
+prompt_port() {
+    local entered number
+    while true; do
+        ask entered '监听端口 [443]：'
+        [[ $entered != q ]] || return 1
+        entered=${entered:-443}
+        if [[ $entered =~ ^[0-9]{1,5}$ ]]; then
+            number=$((10#$entered))
+            if (( number >= 1 && number <= 65535 && number != 80 )); then
+                if [[ -z $(ss -H -ltn "sport = :$number") ]]; then PORT=$number; return 0; fi
+                warn "TCP $number 已被占用，请换一个端口。"; continue
+            fi
+        fi
+        warn '端口须为 1–65535，且保留 80 给证书验证。输入 q 返回。'
+    done
+}
+prompt_path() {
+    local entered
+    while true; do
+        ask entered 'xHTTP 路径 [/]：'
+        [[ $entered != q ]] || return 1
+        entered=${entered:-/}
+        if [[ $entered == /* && $entered != *[[:space:]]* && $entered != *\?* && $entered != *\#* ]]; then
+            XPATH=$entered; return 0
+        fi
+        warn '路径须以 / 开头，且不包含空白、? 或 #。输入 q 返回。'
+    done
+}
+
+show_menu() {
+    local service domain=未配置 port=— users=— state_color
+    service=$(systemctl is-active xray 2>/dev/null) || :
+    state_color=$C_WARN
+    case $service in active) service='● 运行中'; state_color=$C_OK;;
+        failed) service='● 运行失败'; state_color=$C_ERR;;
+        *) service='○ 未运行';; esac
+    if [[ -s $DOMAIN_FILE ]]; then domain=$(cat "$DOMAIN_FILE"); fi
+    if command -v jq >/dev/null && [[ -s $CONFIG ]]; then
+        port=$(jq -er '.inbounds[0].port' "$CONFIG" 2>/dev/null) || port=—
+        users=$(jq -er '.inbounds[0].settings.clients | length' "$CONFIG" 2>/dev/null) || users=—
+    fi
+    printf '\n%s  ╭────────────────────────────────────────────╮\n  │          Xray · XHTTP 节点管理             │\n  ╰────────────────────────────────────────────╯%s\n' "$C_TITLE" "$C_RESET"
+    printf '\n  服务状态：%s%s%s\n  当前域名：%s\n  监听端口：%s\n  用户数量：%s\n' "$state_color" "$service" "$C_RESET" "$domain" "$port" "$users"
+    printf '\n  %s节点管理%s\n  [1] 安装 / 更新环境\n  [2] 添加用户\n  [3] 删除用户\n  [4] 查看用户和节点链接\n' "$C_TITLE" "$C_RESET"
+    printf '\n  %s服务维护%s\n  [7] 重启 Xray 服务\n  [8] 更新域名和证书\n' "$C_TITLE" "$C_RESET"
+    printf '\n  %s[5] 彻底卸载%s                  [6] 退出\n' "$C_ERR" "$C_RESET"
+}
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
 uri() { jq -rn --arg value "$1" '$value | @uri'; }
-download() { curl --fail --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"; }
+download() { curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"; }
 lock() { install -d -o root -g root -m 0700 /run/xy; exec 9>"$LOCK"; flock -w 120 9 || die '另一项操作仍在进行，请稍后再试。'; }
 
 platform() {
@@ -34,13 +136,13 @@ platform() {
 
 dependencies() {
     if command -v apt-get >/dev/null; then
-        apt-get update || return
-        DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl socat cron util-linux iproute2 unzip tar || return
+        run_logged '更新软件源索引' apt-get update || return
+        run_logged '安装系统依赖' env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl socat cron util-linux iproute2 unzip tar || return
         systemctl enable --now cron || return
     elif command -v dnf >/dev/null || command -v yum >/dev/null; then
         local pm
         pm=$(command -v dnf || command -v yum)
-        "$pm" install -y ca-certificates curl jq openssl socat cronie util-linux iproute unzip tar || return
+        run_logged '安装系统依赖' "$pm" install -y ca-certificates curl jq openssl socat cronie util-linux iproute unzip tar || return
         systemctl enable --now crond || return
     else
         say '不支持此包管理器。'; return 1
@@ -116,11 +218,11 @@ enable_encryption_config() {
     return 1
 }
 
-test_config() { xray run -test -config "$1"; }
+test_config() { run_logged '校验 Xray 配置' xray run -test -config "$1"; }
 healthy_restart() {
     # 失败的候选配置可能触发 systemd 启动限流；恢复旧配置后须清除计数。
     systemctl reset-failed xray || return 1
-    systemctl restart xray || return 1
+    run_logged '重启 Xray 服务' systemctl restart xray || return 1
     sleep 2
     systemctl is-active --quiet xray
 }
@@ -217,7 +319,7 @@ apply_config() (
     chmod 0640 "$backup/new.json"
     atomic_copy "$backup/new.json" "$CONFIG"
     # 以实际服务身份检查文件可读性与配置，避免 root 检查通过而服务打不开私钥。
-    runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
+    run_logged '检查服务账户读取权限' runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
     healthy_restart
     armed=0
 )
@@ -244,7 +346,7 @@ prepare_certificate() {
         download https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh "$work/acme.sh"
         sh -n "$work/acme.sh"
         cd "$work"
-        sh ./acme.sh --install --home "$ACME_HOME" --no-cron --no-profile --accountemail "admin@$DOMAIN"
+        run_logged '安装证书工具' sh ./acme.sh --install --home "$ACME_HOME" --no-cron --no-profile --accountemail "admin@$DOMAIN"
     fi
     if [[ $ACME_BASE == "$ACME_HOME" ]]; then
         # 单独的 cron 文件，避免 acme.sh 管理 root crontab 时影响其他安装。
@@ -252,7 +354,7 @@ prepare_certificate() {
             '17 3 * * * root /etc/xray-cert/acme/acme.sh --cron --home /etc/xray-cert/acme >>/var/log/xy-acme.log 2>&1' > "$work/xy-acme"
         install -o root -g root -m 0644 "$work/xy-acme" /etc/cron.d/xy-acme
     fi
-    "$ACME" --home "$ACME_BASE" --upgrade --auto-upgrade
+    run_logged '检查证书工具' "$ACME" --home "$ACME_BASE" --upgrade --auto-upgrade
     # 不强制刷新未到期证书，避免重复运行触发 CA 限额。
     local acme_cert_dir=$ACME_BASE/$DOMAIN
     [[ ${#ECC[@]} -eq 0 ]] || acme_cert_dir=${acme_cert_dir}_ecc
@@ -260,26 +362,28 @@ prepare_certificate() {
         [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，无法使用 standalone 验证。'
         say '申请证书：公网 TCP 80 必须可达；如有 AAAA 记录，IPv6 也须正确。'
         rc=0
-        XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --issue --server letsencrypt --standalone --keylength ec-256 -d "$DOMAIN" || rc=$?
+        run_logged '申请 TLS 证书' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --issue --server letsencrypt --standalone --keylength ec-256 -d "$DOMAIN" || rc=$?
         [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书申请失败（退出码 $rc）。"
     fi
     if [[ ${2:-no} == yes ]]; then
         rc=0
-        XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}" || rc=$?
+        run_logged '检查证书续期' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}" || rc=$?
         [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书更新失败（退出码 $rc）。"
     fi
     # 永久保存正式回调；仅本次子进程继承跳过标志，由下方事务完成部署。
     # 标志不会写入 acme 配置/cron，即使本次部署失败，后续回调仍然有效。
-    XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --install-cert -d "$DOMAIN" "${ECC[@]}" \
+    run_logged '准备证书文件和续期回调' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --install-cert -d "$DOMAIN" "${ECC[@]}" \
         --key-file "$STAGE/server.key" --fullchain-file "$STAGE/server.crt" --reloadcmd "$SCRIPT --renew-reload $DOMAIN"
     if ! openssl x509 -in "$STAGE/server.crt" -noout -checkend 86400 >/dev/null; then
         [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，证书无法续期。'
-        XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}"
+        run_logged '检查证书续期' env XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}"
     fi
 }
 
 install_xray() (
     set -e
+    heading '安装 / 更新 Xray'
+    step 1 '检查系统和依赖'
     dependencies
     lock
     local work existing=0 PORT XPATH UUID rc
@@ -287,16 +391,18 @@ install_xray() (
     trap 'rm -rf -- "$work"' EXIT
     [[ -f $CONFIG ]] && existing=1
     if (( existing )); then managed_config; fi
+    step 2 '安装或更新 Xray 核心'
     download "$INSTALL_URL" "$work/install-release.sh"
     bash -n "$work/install-release.sh"
     # 官方安装器可能升级并重启核心；现有配置不重新生成。
-    bash "$work/install-release.sh" install
+    run_logged '安装 Xray 核心' bash "$work/install-release.sh" install
     if (( ! existing )); then
         # 官方安装器可能写入空配置；失败重试时不能把它误认成已有节点。
         rm -f -- "$CONFIG"
     fi
     require_tools
     directories
+    step 3 '配置节点'
     if (( existing )); then
         [[ -s $DOMAIN_FILE ]] || die '旧配置缺少 /etc/xray-cert/domain.txt，请先补入实际域名。'
         DOMAIN=$(cat "$DOMAIN_FILE")
@@ -304,16 +410,10 @@ install_xray() (
         cp "$CONFIG" "$work/candidate.json"
         say '已有配置：保留全部用户、UUID、端口和路径。'
     else
-        ask DOMAIN '请输入域名（已解析到本服务器）：'
-        DOMAIN=${DOMAIN,,}
-        domain_valid "$DOMAIN" || die '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。'
-        ask PORT '监听端口 [443]：'; PORT=${PORT:-443}
-        [[ $PORT =~ ^[0-9]{1,5}$ ]] || die '端口必须是 1–65535 的整数。'
-        PORT=$((10#$PORT))
-        (( PORT >= 1 && PORT <= 65535 && PORT != 80 )) || die '端口须为 1–65535，且保留 80 给证书验证。'
-        [[ -z $(ss -H -ltn "sport = :$PORT") ]] || die "TCP $PORT 已被占用。"
-        ask XPATH 'xHTTP 路径 [/]：'; XPATH=${XPATH:-/}
-        [[ $XPATH == /* && $XPATH != *[[:space:]]* && $XPATH != *\?* && $XPATH != *\#* ]] || die '路径须以 / 开头，且不包含空白、? 或 #。'
+        say '  填写节点信息，直接回车使用默认值；输入 q 返回。'
+        prompt_domain DOMAIN '请输入域名（已解析到本服务器）：' || exit 0
+        prompt_port || exit 0
+        prompt_path || exit 0
         UUID=$(new_uuid)
         jq -n --argjson port "$PORT" --arg id "$UUID" --arg path "$XPATH" --arg cert "$CERT" --arg key "$KEY" '
           {log:{loglevel:"warning"},inbounds:[{port:$port,protocol:"vless",
@@ -324,10 +424,15 @@ install_xray() (
         ' > "$work/candidate.json"
         enable_encryption_config "$work/candidate.json"
     fi
+    step 4 '准备 TLS 证书'
     prepare_certificate "$work"
+    step 5 '启动并验证服务'
     apply_config "$work/candidate.json" yes "$DOMAIN"
     systemctl enable xray
-    say '安装/更新完成；证书续期回调已注册。'
+    heading '部署完成'
+    success '安装/更新完成；证书续期回调已注册。'
+    printf '  域名：%s\n  端口：%s\n  路径：%s\n  传输：VLESS Encryption + XHTTP + TLS\n' "$DOMAIN" "$(jq -r '.inbounds[0].port' "$CONFIG")" "$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$CONFIG")"
+    say "  诊断日志：$LOG_FILE"
     list_users
 )
 
@@ -344,17 +449,19 @@ renew_reload() (
 
 restart_xray() (
     set -e
+    heading '重启 Xray 服务'
     require_tools
     lock
     managed_config
     identity
-    runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
+    run_logged '检查服务账户读取权限' runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
     healthy_restart
-    say 'Xray 服务已重启并确认运行。'
+    success 'Xray 服务已重启并确认运行。'
 )
 
 update_domain_certificate() (
     set -e
+    heading '更新域名和证书'
     require_tools
     lock
     managed_config
@@ -370,10 +477,7 @@ update_domain_certificate() (
     old_ecc=("${ECC[@]}")
     say "当前域名：$old_domain"
     say '新域名须先解析到本机，公网 TCP 80 须可用于证书验证。留空保留域名，并检查证书续期；未到期时不会强制重签。'
-    ask DOMAIN "请输入新域名 [$old_domain]："
-    DOMAIN=${DOMAIN:-$old_domain}
-    DOMAIN=${DOMAIN,,}
-    domain_valid "$DOMAIN" || die '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。'
+    prompt_domain DOMAIN "请输入新域名 [$old_domain]：" "$old_domain" || exit 0
     work=$(mktemp -d)
     trap 'rm -rf -- "$work"' EXIT
     prepare_certificate "$work" yes
@@ -387,7 +491,7 @@ update_domain_certificate() (
             say '新域名已生效，但旧域名续期停用失败，请检查 ACME 日志。'
         fi
     fi
-    say '域名和证书更新完成；用户、UUID、加密参数、端口和路径已保留。'
+    success '域名和证书更新完成；用户、UUID、加密参数、端口和路径已保留。'
     say '域名变化后，请将以下新链接重新导入客户端。'
     list_users
 )
@@ -396,17 +500,26 @@ add_user() (
     set -e
     require_tools
     local EMAIL UUID temp
-    ask EMAIL '请输入新用户名/邮箱：'
-    [[ -n $EMAIL && ${#EMAIL} -le 128 && $EMAIL != *[[:cntrl:]]* ]] || die '用户名须为 1–128 字符且不含控制字符。'
+    heading '添加用户'
     lock
     managed_config
-    jq -e --arg email "$EMAIL" 'any(.inbounds[0].settings.clients[]; .email==$email)' "$CONFIG" >/dev/null && die '此用户名已存在。'
+    while true; do
+        ask EMAIL '请输入新用户名/邮箱：'
+        [[ $EMAIL != q ]] || exit 0
+        if [[ -z $EMAIL || ${#EMAIL} -gt 128 || $EMAIL == *[[:cntrl:]]* ]]; then
+            warn '用户名须为 1–128 字符且不含控制字符。输入 q 返回。'; continue
+        fi
+        if jq -e --arg email "$EMAIL" 'any(.inbounds[0].settings.clients[]; .email==$email)' "$CONFIG" >/dev/null; then
+            warn '此用户名已存在，请换一个名称。'; continue
+        fi
+        break
+    done
     temp=$(mktemp "$XRAY_DIR/.xy-candidate.XXXXXX")
     trap 'rm -f -- "$temp"' EXIT
     UUID=$(new_uuid)
     jq --arg id "$UUID" --arg email "$EMAIL" '.inbounds[0].settings.clients += [{id:$id,email:$email}]' "$CONFIG" > "$temp"
     apply_config "$temp"
-    say "已添加用户：$EMAIL"
+    success "已添加用户：$EMAIL"
     print_link "$EMAIL" "$UUID"
 )
 
@@ -414,21 +527,25 @@ del_user() (
     set -e
     require_tools
     local EMAIL CONFIRM temp
-    managed_config
-    jq -r '.inbounds[0].settings.clients[].email' "$CONFIG"
-    ask EMAIL '请输入要删除的用户名/邮箱：'
-    [[ -n $EMAIL ]] || exit 0
-    ask CONFIRM "确定删除 $EMAIL？[y/N]："
-    [[ $CONFIRM =~ ^[Yy]$ ]] || exit 0
     lock
     managed_config
-    jq -e --arg email "$EMAIL" 'any(.inbounds[0].settings.clients[]; .email==$email)' "$CONFIG" >/dev/null || die '用户不存在。'
+    heading '删除用户'
+    warn '删除后，该用户的节点链接将失效。'
+    jq -r '.inbounds[0].settings.clients[].email' "$CONFIG"
+    while true; do
+        ask EMAIL '请输入要删除的用户名/邮箱：'
+        [[ -n $EMAIL && $EMAIL != q ]] || exit 0
+        if jq -e --arg email "$EMAIL" 'any(.inbounds[0].settings.clients[]; .email==$email)' "$CONFIG" >/dev/null; then break; fi
+        warn '用户不存在，请从列表中选择；直接回车或输入 q 返回。'
+    done
+    ask CONFIRM "确定删除 $EMAIL？[y/N]："
+    [[ $CONFIRM =~ ^[Yy]$ ]] || { say '  已取消删除。'; exit 0; }
     temp=$(mktemp "$XRAY_DIR/.xy-candidate.XXXXXX")
     trap 'rm -f -- "$temp"' EXIT
     jq --arg email "$EMAIL" '.inbounds[0].settings.clients |= map(select(.email!=$email))' "$CONFIG" > "$temp"
     jq -e '.inbounds[0].settings.clients | length > 0' "$temp" >/dev/null || die '至少需要保留一个用户。'
     apply_config "$temp"
-    say "已删除用户：$EMAIL"
+    success "已删除用户：$EMAIL"
 )
 
 print_link() {
@@ -442,8 +559,9 @@ print_link() {
         encryption=$(jq -er '._xy.vlessEncryption | select(type == "string" and startswith("mlkem768x25519plus."))' "$CONFIG") ||
             { say '缺少客户端加密参数，无法生成有效链接；请恢复完整配置备份。' >&2; return 1; }
     fi
-    printf '用户：%s\nUUID：%s\n链接：vless://%s@%s:%s?encryption=%s&security=tls&sni=%s&type=xhttp&path=%s#%s\n\n' \
-        "$1" "$2" "$2" "$domain" "$port" "$(uri "$encryption")" "$(uri "$domain")" "$(uri "$path")" "$(uri "$1")"
+    printf '\n  用户：%s\n  UUID：%s\n  节点链接（整行复制）：\n' "$1" "$2"
+    printf 'vless://%s@%s:%s?encryption=%s&security=tls&sni=%s&type=xhttp&path=%s#%s\n\n' \
+        "$2" "$domain" "$port" "$(uri "$encryption")" "$(uri "$domain")" "$(uri "$path")" "$(uri "$1")"
 }
 
 list_users() (
@@ -451,6 +569,7 @@ list_users() (
     require_tools
     managed_config
     local row email uuid
+    heading '用户和节点链接'
     while IFS= read -r row; do
         email=$(jq -r '.email' <<< "$row")
         uuid=$(jq -r '.id' <<< "$row")
@@ -461,9 +580,10 @@ list_users() (
 uninstall_all() (
     set -e
     local CONFIRM work
-    say '将删除 Xray、所有 Xray 用户配置、此脚本管理的证书和 xy 命令。共享的 /root/.acme.sh 保留。'
-    ask CONFIRM '确定彻底卸载？[y/N]：'
-    [[ $CONFIRM =~ ^[Yy]$ ]] || exit 0
+    heading '彻底卸载'
+    warn '将删除 Xray、所有 Xray 用户配置、此脚本管理的证书和 xy 命令。共享的 /root/.acme.sh 保留。'
+    ask CONFIRM '确认卸载请输入 卸载（直接回车取消）：'
+    [[ $CONFIRM == 卸载 ]] || { say '  已取消卸载。'; exit 0; }
     lock
     work=$(mktemp -d)
     trap 'rm -rf -- "$work"' EXIT
@@ -479,12 +599,12 @@ uninstall_all() (
         fi
     fi
     rm -f -- /etc/cron.d/xy-acme
-    bash "$work/install-release.sh" remove --purge
+    run_logged '卸载 Xray 核心' bash "$work/install-release.sh" remove --purge
     # 固定目录；不删除共享 acme.sh、系统依赖、其他站点或其他 crontab 条目。
     rm -rf -- /usr/local/etc/xray /etc/xray-cert
-    rm -f -- /var/log/xray_cron_error.log /var/log/xy-acme.log /usr/local/bin/xy
+    rm -f -- /var/log/xray_cron_error.log /var/log/xy-acme.log /var/log/xy-manager.log /usr/local/bin/xy
     systemctl daemon-reload
-    say '卸载完成。'
+    success '卸载完成。'
 )
 
 main() {
@@ -504,7 +624,7 @@ main() {
     fi
     local CHOICE rc
     while true; do
-        printf '\nVLESS + xHTTP + TLS 多用户管理\n1. 安装/更新环境（保留现有配置）\n2. 添加用户\n3. 删除用户\n4. 查看所有用户及链接\n5. 彻底卸载\n6. 退出\n7. 重启 Xray 服务\n8. 更新域名和证书\n'
+        show_menu
         ask CHOICE '请选择 [1-8]：'
         case $CHOICE in
             1) install_xray;;
@@ -515,7 +635,7 @@ main() {
             6) return 0;;
             7) restart_xray;;
             8) update_domain_certificate;;
-            *) say '无效选项。'; continue;;
+            *) warn '请输入 1–8 中的菜单编号。'; continue;;
         esac
         rc=$?
         (( rc == 0 )) || say "操作未完成（退出码 $rc），请查看上方错误。"
