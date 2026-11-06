@@ -364,7 +364,7 @@ run_logged 'fixture action' sh -c 'echo ui-error-detail >&2; exit 7'
     check('stale domain callback cannot replace active identity',
           digest(CERT) == new_cert and digest(KEY) == new_key and active())
     links = subprocess.check_output(['bash', '-c', 'source /usr/local/bin/xy; list_users'], text=True)
-    link = next(line.removeprefix('链接：') for line in links.splitlines() if line.startswith('链接：'))
+    link = next(line for line in links.splitlines() if line.startswith('vless://'))
     check('new links use updated address and SNI', urlsplit(link).hostname == 'new.example.test'
           and parse_qs(urlsplit(link).query)['sni'] == ['new.example.test'])
 
